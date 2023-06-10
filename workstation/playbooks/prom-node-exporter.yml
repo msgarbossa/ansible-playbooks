@@ -1,0 +1,160 @@
+---
+
+- name: Prometheus Node Exporter (OS metrics)
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+
+    - name: set fact for prom install
+      set_fact:
+        install_prom: false
+
+    - name: Check if /usr/sbin/node_exporter exists
+      stat:
+        path: /usr/sbin/node_exporter
+      register: stat_node_exporter
+      ignore_errors: true
+
+    - name: Set fact to install prom if it does not exist
+      set_fact:
+        install_prom: true
+      when: not stat_node_exporter.stat.exists
+
+    - name: Check version if it exists
+      block:
+        - name: run command to get version
+          command: /usr/sbin/node_exporter --version | head -1
+          changed_when: false
+          register: prom_version_cmd
+
+        # node_exporter, version 1.6.0 (branch: HEAD, revision: )
+        - name: set fact with version
+          set_fact:
+            prom_version_parsed: "{{ prom_version_cmd.stdout.split()[2] }}"  # 1.6.0
+
+        - name: current version
+          debug:
+            var: prom_version_parsed
+
+        - name: Update fact to install prom node agent if version does not match
+          set_fact:
+            install_prom: true
+          when: prom_version_parsed != prom_node_agent_version
+
+      when: stat_node_exporter.stat.exists
+
+    - name: install prom?
+      debug:
+        var: install_prom
+
+    - meta: end_play
+      when: not install_prom
+
+    - name: Remove existing prom node exporter if it exists
+      ansible.builtin.file:
+        path:  /usr/sbin/node_exporter
+        state: absent
+      when: stat_node_exporter.stat.exists
+
+    - name: Setup node_exporter if it does not exist
+      block:
+        - name: Creating node_exporter user group
+          group:
+            name: node_exporter
+
+        - name: node_exporter user account
+          ansible.builtin.user:
+            name: node_exporter
+            group: node_exporter
+            shell: /sbin/nologin
+            create_home: false
+            comment: Prometheus node exporter for performance metrics
+            local: true
+            expires: -1
+            state: present
+
+        - name: Download Prometheus node exporter
+          get_url:
+            url: "https://github.com/prometheus/node_exporter/releases/download/v{{prom_node_agent_version}}/node_exporter-{{prom_node_agent_version}}.linux-amd64.tar.gz"
+            dest: /tmp/node_exporter.tar.gz
+            mode: '0750'
+            owner: root
+            group: root
+
+        - name: Unpack node exporter
+          shell: |
+            #!/bin/bash
+            set -e  # exit on failure
+            cd /tmp
+            tar -zxf node_exporter.tar.gz
+            mv -f node_exporter-*/node_exporter /usr/sbin/node_exporter
+            chmod 750 /usr/sbin/node_exporter
+            chown node_exporter:daemon /usr/sbin/node_exporter
+            rm /tmp/node_exporter.tar.gz
+          args:
+            executable: /bin/bash
+
+        - name: Copy /etc/systemd/system/node_exporter.service
+          copy:
+            content: |
+              [Unit]
+              Description=Node Exporter
+              Documentation=https://github.com/prometheus/node_exporter
+              After=network-online.target
+
+              [Service]
+              Restart=always
+              User=node_exporter
+              Group=node_exporter
+              EnvironmentFile=/etc/default/node_exporter
+              ExecStart=/usr/sbin/node_exporter $OPTIONS
+
+              [Install]
+              WantedBy=multi-user.target
+            dest: /etc/systemd/system/node_exporter.service
+            owner: root
+            group: root
+            mode: '0644'
+
+        - name: systemctl daemon-reload
+          systemd:
+            daemon_reload: true
+
+        - name: Create /var/lib/node_exporter directory
+          file:
+            path: /var/lib/node_exporter
+            state: directory
+            recurse: true
+            owner: root
+            group: root
+            mode: '0750'
+
+        - name: Create /var/lib/node_exporter/textfile_collector directory
+          file:
+            path: /var/lib/node_exporter/textfile_collector
+            state: directory
+            recurse: true
+            owner: node_exporter
+            group: daemon
+            mode: '0750'
+
+        - name: Copy /etc/default/node_exporter
+          copy:
+            content: |
+              OPTIONS="--web.listen-address=192.168.1.175:9101"
+              # OPTIONS="--collector.textfile.directory /var/lib/node_exporter/textfile_collector"
+              # --web.listen-address=localhost:9100
+            dest: /etc/default/node_exporter
+            owner: node_exporter
+            group: daemon
+            mode: '0640'
+
+        - name: Make sure node_exporter service is enabled and running
+          systemd:
+            state: started
+            enabled: true
+            name: node_exporter
+      when: install_prom
+
