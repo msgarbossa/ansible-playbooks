@@ -1,0 +1,79 @@
+---
+
+- name: Setup golang
+  hosts: all
+  become: true
+  gather_facts: false
+  vars:
+    go_version: 1.18.3
+    arch: linux-amd64
+
+  tasks:
+
+    - name: Set fact for go install
+      ansible.builtin.set_fact:
+        install_go: false
+
+    - name: Check if /usr/local/go exists
+      ansible.builtin.stat:
+        path: /usr/local/go/bin/go
+      register: stat_go
+      ignore_errors: true
+
+    - name: Set fact to install go if it does not exist
+      ansible.builtin.set_fact:
+        install_go: true
+      when: not stat_go.stat.exists
+
+    - name: Check go version if it exists
+      when: stat_go.stat.exists
+      block:
+        - name: Run go version command
+          ansible.builtin.command: /usr/local/go/bin/go version
+          changed_when: false
+          register: go_version_cmd
+
+        - name: Set fact with version
+          ansible.builtin.set_fact:
+            go_version_parsed: "{{ go_version_cmd.stdout.split()[2] }}"  # go1.18.3
+
+        - name: Print current version
+          ansible.builtin.debug:
+            var: go_version_parsed
+
+        - name: Update fact to install go if version does not match
+          ansible.builtin.set_fact:
+            install_go: true
+          when: go_version_parsed != "go" + go_version
+
+    - name: Install go?
+      ansible.builtin.debug:
+        var: install_go
+
+    - name: End play if go does not need to be installed
+      ansible.builtin.meta: end_play
+      when: not install_go
+
+    - name: Recursively remove go directory if it exists
+      ansible.builtin.file:
+        path: /usr/local/go
+        state: absent
+      when: stat_go.stat.exists
+
+    - name: Download Golang
+      ansible.builtin.get_url:
+        url: "https://go.dev/dl/go{{ go_version }}.{{ arch }}.tar.gz"
+        dest: /tmp/go.tar.gz
+        mode: '0750'
+        owner: root
+        group: root
+
+    - name: Unpack golang
+      ansible.builtin.shell: |
+        #!/bin/bash
+        set -e  # exit on failure
+        tar -C /usr/local -xzf /tmp/go.tar.gz
+        rm -f /tmp/go.tar.gz
+      args:
+        executable: /bin/bash
+      changed_when: true
